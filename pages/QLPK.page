@@ -1,0 +1,411 @@
+<apex:page standardController="Large_Object__c" extensions="QLPKExt">
+
+	<script src="../../soap/ajax/34.0/connection.js" type="text/javascript" />
+	
+	
+ 	<script type="text/javascript">	
+ 	
+ 	//Set VF timeout to max of 2 mins at page level 
+ 	Visualforce.remoting.timeout = 120000; 
+ 	
+	//Set AJAX timeout to 15 mins (conversion to MS)
+	var AJAXtimeout = 15 * (60 * 1000);	 	
+	var chunkSize = 50000; 	
+
+	sforce.connection.sessionId = "{!$Api.Session_ID}";	
+	var chunkList = {};
+	var offsetIdMap = {};
+	var totalQueryMoreSize = {};
+	var totalQueriesCompleted = {};    
+	var objectQueriesCompleted = {};
+	var objectAllQueriesCompleted = {};		
+	var errors = [];
+	
+	var totalChunks = 0;
+	
+	chunkEntireDB('Large_Object__c');
+	
+
+	function chunkEntireDB(objectName) {
+
+		chunkList[objectName] = [];
+		objectQueriesCompleted[objectName] = 0;
+		objectAllQueriesCompleted[objectName] = false;
+		
+		totalQueriesCompleted[objectName] = 0;
+		
+		var SOQL = ("SELECT Id FROM " + objectName + " ORDER BY Id");
+		console.log('SOQL: '+ SOQL);
+		
+		var result = sforce.connection.query(SOQL, {
+			onSuccess: function(result) {
+				
+				console.log('success');
+	
+				var resultValues = getResultValues(result);
+
+				console.log('result');
+				console.log(result);
+				
+				console.log('resultValues');
+				console.log(resultValues);
+				
+				var objectName = resultValues.type;		
+				
+				//add the first result to our object before we fire off all the subsequent ones in parallel
+				if(resultValues.type in offsetIdMap) {
+					offsetIdMap[objectName][resultValues.offset] = resultValues; 
+				} else {	
+					offsetIdMap[objectName] = {};
+					offsetIdMap[objectName][resultValues.offset] = resultValues; 
+				}
+		
+			
+				if (resultValues.totalSize <= 2000) {
+					//this means there is no cursor Id, we got all the records returned to us
+					//chunk is just the first and last Id in the locator, jump right to success
+			       	totalQueryMoreSize[objectName] = 1;
+			       	qmSuccess(result);					
+				} else {
+					//> 2000 records means that we need to chunk
+					
+					//get the loop size
+					var loopSize = Math.floor(resultValues.totalSize / chunkSize);
+					
+					//we need to know ahead of time how many times we are going to call doQueryMore, so when the 
+					//results come back async, we know if we are done or not
+					totalQueryMoreSize[objectName] = loopSize;
+			
+					//in case it didn't divide evenly, will have to fire off one more query of a custom size
+					//the offset will be the total number of records in the querylocator minus the leftover
+					//EX: 100,002, R=2, offset = 100,002 - 2 = 100,000
+					var remainder = resultValues.totalSize % chunkSize;		
+					
+					//in some cases we don't need another queryMore for the remainder.
+					//if total records - running total is less than chunk size, the last id query will get us everything
+					var runningTotal = (chunkSize * loopSize);
+					if ((resultValues.totalSize - runningTotal) < chunkSize) {
+						remainder = 0;
+					}
+					
+					//if the chunks divide perfectly into the totalSize, subtract one from the loopsize
+					//otherwise we will be requesting an offset that doesn't exist at the end.
+					if ((resultValues.totalSize - runningTotal) == 0) {
+						loopSize--;
+						totalQueryMoreSize[objectName]--;
+					}
+					
+					if (remainder > 0) {
+						totalQueryMoreSize[objectName] ++;
+					}	
+				
+					//add in one more for the query of the last Id
+					totalQueryMoreSize[objectName] ++;
+			
+					//fire off all the queryMore's for loopSize
+			        for (var i=1; i<=loopSize; i++) {
+			            var offset = chunkSize * i;
+			            doQueryMore(resultValues.cursorId, offset); 
+			        } 
+			        
+					//fire off one more if there was a remainder
+					if (remainder > 0) {
+						var offset = (resultValues.totalSize - remainder);
+						doQueryMore(resultValues.cursorId, offset); 	
+					}				
+			
+					//now fire off one more to get the last Id in the cursor
+					var offset = (resultValues.totalSize - 1);
+					doQueryMore(resultValues.cursorId, offset); 					
+				}
+
+			
+			},
+			onFailure: function(error) {
+				var qErr = {};
+				qErr.status = false;
+				qErr.type = 'exception';
+				qErr.message = 'Problem getting query locator: ' + error;
+
+				checkErrors (qErr);					
+			}, 
+			timeout: AJAXtimeout
+		});		
+		
+
+
+	}
+
+	function doQueryMore(cursorId, offset) {
+		var ql = cursorId + '-' + offset;
+		console.log('queryMore ql');
+		console.log(ql);
+		sforce.connection.queryMore(ql, {
+			onSuccess: qmSuccess,
+			onFailure: queryError,
+			timeout: AJAXtimeout
+		});
+	}
+	
+	function qmSuccess(result) {
+	
+		//console.log('result');
+		//console.log(result);		
+		
+		var resultValues = getResultValues(result);
+
+
+		console.log('resultValues');
+		console.log(resultValues);	
+		
+		if (resultValues.type in offsetIdMap) {
+			offsetIdMap[resultValues.type][resultValues.offset] = resultValues; 
+		} else {	
+			offsetIdMap[resultValues.type] = {};
+			offsetIdMap[resultValues.type][resultValues.offset] = resultValues; 
+		}
+		totalQueriesCompleted[resultValues.type] ++;
+
+		console.log(totalQueryMoreSize[resultValues.type] + ', ' + totalQueriesCompleted[resultValues.type]);
+		if (totalQueryMoreSize[resultValues.type] == totalQueriesCompleted[resultValues.type]) {
+			allQueriesComplete(resultValues.type);
+		}
+	}
+
+	function queryError(error) {
+		var qErr = {};
+		qErr.status = false;
+		qErr.type = 'exception';
+		qErr.message = 'error';
+		
+		checkErrors (qErr);
+	}
+
+	function getResultValues(result) {
+		var retObj = {};
+		retObj.totalSize = -1;
+		retObj.cursorId = '';
+		retObj.offset = 999999999999; //~1T records.  using this to put last result at the end of the sort, its QL will be null
+		retObj.firstRecordId = '';
+		retObj.lastRecordId = '';
+		retObj.type = '';
+		
+		//get the querylocator from the result
+		var ql = result.queryLocator;
+		
+		//ql will look like this:
+		//01gJ000000IYnYLIA1-2000
+		
+		//split the ql into cursorId and offset
+		if (ql != null) { //if there are no more records to get, ql will be null
+			var arrQL = ql.split('-');
+			if (arrQL.length == 2) {
+				retObj.cursorId = arrQL[0];
+				retObj.offset 	= arrQL[1];
+			}	
+		}
+
+		
+		//get the total size, convert to int
+		retObj.totalSize = parseInt(result['size']);		
+		
+		//get the first record Id
+		var firstRecordFound = false;
+		if ('records' in result) {
+			//see if it is in an array
+			if (Object.prototype.toString.call(result.records) === '[object Array]') {
+				if (result.records.length > 0) {
+					retObj.firstRecordId = result.records[0].Id;
+					retObj.type = result.records[0].type;
+					firstRecordFound = true;
+				}			
+			} else {
+				//or else just a single object
+				if ('Id' in result.records) {
+					retObj.firstRecordId = result.records.Id;
+					retObj.type = result.records.type;
+					firstRecordFound = true;				
+				}
+			}
+		}
+		
+		//get the last record Id
+		var lastRecordFound = false;
+		if ('records' in result) {
+			//see if it is in an array
+			if (Object.prototype.toString.call(result.records) === '[object Array]') {
+				if (result.records.length > 0) {
+					retObj.lastRecordId = result.records[result.records.length-1].Id;
+					lastRecordFound = true;
+				}			
+			} else {
+				//or else just a single object
+				if ('Id' in result.records) {
+					retObj.lastRecordId = result.records.Id;
+					lastRecordFound = true;				
+				}
+			}
+		}
+		return retObj;
+	}
+
+
+
+
+	function allQueriesComplete(type) {
+		
+		//build an array of all the keys so we can sort them
+		var offsetArray = [];
+		for (var offset in offsetIdMap[type]) {
+			offsetArray.push(parseInt(offset));
+		}
+											
+		offsetArray.sort(function(a,b) { return a - b; });
+		
+		//loop from the beginning to the next to last one
+		//don't need the last since it just contains the very last Id - special case
+		
+		if(offsetArray.length==1) {
+			var range = {};
+			
+			range.first = offsetIdMap[type][offsetArray[0]].firstRecordId;
+			range.last = offsetIdMap[type][offsetArray[0]].lastRecordId;
+			range.isLast = true;
+			chunkList[type].push(range);
+			
+		} else {
+			
+			for (var i=0; i<(offsetArray.length-1); i++) {
+				var range = {};
+				range.first = '';
+				range.last = '';
+				range.isLast = false;
+				
+				var currOffset = offsetArray[i];
+				var nextOffset = offsetArray[i+1];
+				range.first = offsetIdMap[type][currOffset].firstRecordId;
+			
+				var lastLoop = false;
+				if (i == (offsetArray.length-2)) {
+					lastLoop = true;
+				}
+	
+				if (lastLoop) {
+					range.isLast = true;
+					
+					//the last Id will be the actual last Id from the very last chunk
+					range.last  = offsetIdMap[type][nextOffset].lastRecordId;
+				} else {
+					//the last Id will be the first from the next chunk (have to use < logic)
+					range.last  = offsetIdMap[type][nextOffset].firstRecordId; 			
+				}
+				chunkList[type].push(range);
+				
+			}
+		}
+		
+		console.log('chunkList');
+		console.log(chunkList);
+
+		console.log('***done***');	
+		
+
+		for (var i=0; i<chunkList[type].length; i++) {
+			queryChunk(i);
+		}
+		
+		
+		
+	}		
+		
+		
+    function checkErrors (event) { 
+        if (event.status) {            
+
+        } else if (event.type === 'exception') {
+            errors.push(event.message + ' : ' + event.type);
+        } else {
+         	errors.push(event.message);
+        }
+        
+        if (errors.length == 0) {
+
+        } else {
+			console.log('***errors***');
+			console.log(errors);
+        }
+    }   		
+		
+	//=============
+	
+	var objectAnums = [];
+	var queryChunkCount = 0;
+	
+	function queryChunk(chunkIndex) {
+		
+		var chunk = chunkList.Large_Object__c[chunkIndex];
+		
+		Visualforce.remoting.Manager.invokeAction(
+			'{!$RemoteAction.QLPKExt.queryChunk}',
+			chunk.first, chunk.last, chunk.isLast,
+			function (result, event) {
+				
+				console.log(result);
+				
+				var doRetry = checkRetry(event);			        
+				if (doRetry == false) {
+					checkErrors(event);
+				}				
+				
+				if (event.status) {
+					//add all the autonumbers from this response to our master list of all 
+					//autonumbers meeting our criteria
+					for (var i=0; i<result.length; i++) {
+						objectAnums.push(result[i].Autonumber__c);	
+					}
+					
+					queryChunkCount++;
+					if (queryChunkCount == chunkList.Large_Object__c.length) {
+						allQueryChunksComplete();
+					}		
+				}
+								
+				if (doRetry) {
+					queryChunk(chunkIndex);		
+				}
+
+			},
+			{escape: false, buffer: false}
+		);	
+
+	}
+	
+	
+	function allQueryChunksComplete() {
+		console.log('***All Chunk Queries Complete***');
+		
+		console.log('All autonumbers of records with number between 10 and 20 in 40M records');
+		console.log(objectAnums);
+		
+	}
+		
+		
+	//===========================
+	
+	
+   	function checkRetry(event) {
+        var doRetry = false;
+        if (event.type === 'exception') {
+        	if ((event.message.indexOf("timeout") > -1) ||
+        		(event.message.indexOf("Remoting request invalid for your session") > -1) || 
+        		(event.message.indexOf("Logged in") > -1)) {
+        		doRetry = true;	
+        	}	
+        }  
+        return doRetry;  	
+	}	
+	
+	</script>
+
+
+</apex:page>

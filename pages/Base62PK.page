@@ -1,0 +1,163 @@
+<apex:page standardController="Large_Object__c" extensions="Base62PKext">
+
+
+
+ 	<script type="text/javascript">	
+
+ 	//Set VF timeout to max of 2 mins at page level 
+ 	Visualforce.remoting.timeout = 120000; 
+ 		
+	var chunkSize = 50000; 	
+	var errors = [];	
+	
+	var firstId;
+	var lastId;
+	var chunkList = [];
+	
+	var objectAnums = [];
+	var queryChunkCount = 0;	
+	
+	getFirstAndLastId();
+ 		
+ 		
+	function getFirstAndLastId() {
+		
+		Visualforce.remoting.Manager.invokeAction(
+			'{!$RemoteAction.Base62PKext.getFirstId}',
+			function (result, event) {
+				checkErrors(event);
+				console.log('First Id Result');				
+				console.log(result);
+				firstId = result;
+	
+				Visualforce.remoting.Manager.invokeAction(
+					'{!$RemoteAction.Base62PKext.getLastId}',
+					function (result, event) {
+						checkErrors(event);
+						console.log('Last Id Result');				
+						console.log(result);
+						lastId = result;
+						
+						base62Chunk();
+					},
+					{escape: false, buffer: false}
+				);	 		
+	
+			},
+			{escape: false, buffer: false}
+		);	 		
+		
+	}
+	
+	
+	function base62Chunk() {
+		console.log('First Id: ' + firstId + ', Last Id: ' + lastId);
+		
+		Visualforce.remoting.Manager.invokeAction(
+			'{!$RemoteAction.Base62PKext.doBase62Chunk}',
+			firstId, lastId, chunkSize,
+			function (result, event) {
+				checkErrors(event);
+				console.log('Base 62 Chunk Result');				
+				console.log(result);
+
+				chunkList = result;
+				
+				queryChunks();
+			},
+			{escape: false, buffer: false}
+		);	 			
+	}
+	
+
+	function queryChunks() {
+		for (var i=0; i<chunkList.length; i++) {
+			queryChunk(i);
+		}	
+	}
+	
+	
+	function queryChunk(chunkIndex) {
+		var chunk = chunkList[chunkIndex];
+		
+		Visualforce.remoting.Manager.invokeAction(
+			'{!$RemoteAction.Base62PKext.queryChunk}',
+			chunk.first, chunk.last,
+			function (result, event) {
+				
+				console.log(result);
+				
+				var doRetry = checkRetry(event);			        
+				if (doRetry == false) {
+					checkErrors(event);
+				}				
+				
+				if (event.status) {
+					//add all the autonumbers from this response to our master list of all 
+					//autonumbers meeting our criteria
+					for (var i=0; i<result.length; i++) {
+						objectAnums.push(result[i].Autonumber__c);	
+					}
+					
+					queryChunkCount++;
+					if (queryChunkCount == chunkList.length) {
+						allQueryChunksComplete();
+					}		
+				}
+								
+				if (doRetry) {
+					queryChunk(chunkIndex);		
+				}
+
+			},
+			{escape: false, buffer: false}
+		);			
+		
+	}
+	
+	
+	function allQueryChunksComplete() {
+		console.log('***All Chunk Queries Complete***');
+		
+		console.log('All autonumbers of records with number between 10 and 20 in 40M records');
+		console.log(objectAnums);
+		
+	}	
+	
+	
+    function checkErrors (event) { 
+        if (event.status) {            
+
+        } else if (event.type === 'exception') {
+            errors.push(event.message + ' : ' + event.type);
+        } else {
+         	errors.push(event.message);
+        }
+        
+        if (errors.length == 0) {
+
+        } else {
+			console.log('***errors***');
+			console.log(errors);
+        }
+    }   			
+ 		
+	
+   	function checkRetry(event) {
+        var doRetry = false;
+        if (event.type === 'exception') {
+        	if ((event.message.indexOf("timeout") > -1) ||
+        		(event.message.indexOf("Remoting request invalid for your session") > -1) || 
+        		(event.message.indexOf("Logged in") > -1)) {
+        		doRetry = true;	
+        	}	
+        }  
+        return doRetry;  	
+	}		
+ 		
+ 	
+ 	
+ 	</script>
+
+
+</apex:page>
