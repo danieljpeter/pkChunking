@@ -16,7 +16,6 @@ public with sharing class ChunkService {
 		Long mult = 1;
 		
 		String[] chars = s.split('');
-		chars.remove(0);
 		
 		String[] charsReversed = new List<String>();
 		
@@ -44,7 +43,6 @@ public with sharing class ChunkService {
 		List<String> retList = new List<String>();
 
 		String[] basedigitsArr = basedigits.split('');
-		basedigitsArr.remove(0);
 
 		while (num != 0) {
 			Integer cIndex = (Integer)Math.Mod(num, 62);
